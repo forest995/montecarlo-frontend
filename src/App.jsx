@@ -8,6 +8,44 @@ import {
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+
+const DRIVER_OPTIONS = [
+  "Market & economic conditions",
+  "Labour market & productivity",
+  "Site & environmental conditions",
+  "Regulatory environments",
+  "Procurement & contract complexities",
+  "Technology & commissioning complexity",
+];
+
+const DRIVER_TOOLTIPS = {
+  "Market & economic conditions":
+    "Changes in market prices and economic conditions that affect multiple cost items at the same time (e.g. materials escalation, inflation, fuel or energy costs). Use this when costs tend to rise or fall together due to broader market forces.",
+  "Labour market & productivity":
+    "Availability, cost, and productivity of labour that can influence multiple work packages simultaneously (e.g. wage pressure, labour shortages, industrial action, productivity variation).",
+  "Site & environmental conditions":
+    "Physical site conditions or environmental factors that can impact several cost items together (e.g. ground conditions, access constraints, utilities, weather).",
+  "Regulatory environments":
+    "Regulatory, approval, or authority requirements that may constrain delivery and affect multiple cost items at once (e.g. permits, possessions, third-party approvals, compliance conditions).",
+  "Procurement & contract complexities":
+    "Commercial and procurement factors that can influence costs across multiple packages (e.g. tender market behaviour, contract packaging, risk allocation, claims environment).",
+  "Technology & commissioning complexity":
+    "Complexity or uncertainty associated with systems, technology, testing, or commissioning that may affect multiple cost items together (e.g. system integration or unproven technology).",
+};
+
+const SENSITIVITY_LEVELS = ["none", "low", "medium", "high"];
+
+function sensitivityToIndex(s) {
+  const i = SENSITIVITY_LEVELS.indexOf(String(s || "").toLowerCase());
+  return i === -1 ? 2 : i; // default = medium
+}
+
+function indexToSensitivity(i) {
+  const idx = Math.min(3, Math.max(0, Number(i) || 0));
+  return SENSITIVITY_LEVELS[idx];
+}
+
+
 const EXCLUDED_FACTORS = new Set(["% Allocation"]);
 
 function money(n) {
@@ -288,6 +326,8 @@ function App() {
       bestCaseCost: null,
       mostLikelyCost: null,
       worstCaseCost: null,
+      driverGroup: "",
+      sensitivity: "medium",
     },
     {
       id: "cbs02",
@@ -297,6 +337,8 @@ function App() {
       bestCaseCost: null,
       mostLikelyCost: null,
       worstCaseCost: null,
+      driverGroup: "",
+      sensitivity: "medium",
     },
     {
       id: "cbs03",
@@ -306,6 +348,8 @@ function App() {
       bestCaseCost: null,
       mostLikelyCost: null,
       worstCaseCost: null,
+      driverGroup: "",
+      sensitivity: "medium",
     },
     {
       id: "cbs04",
@@ -315,6 +359,8 @@ function App() {
       bestCaseCost: null,
       mostLikelyCost: null,
       worstCaseCost: null,
+      driverGroup: "",
+      sensitivity: "medium",
     },
   ]);
 
@@ -343,6 +389,10 @@ function App() {
   // Settings
   const [iterations, setIterations] = useState(5000);
   const [seed, setSeed] = useState(123456);
+
+
+  // Correlation modelling (None | Standard)
+  const [correlationMode, setCorrelationMode] = useState("none");
 
   // Results
   const [results, setResults] = useState(null);
@@ -454,6 +504,8 @@ function App() {
         bestCaseCost: null,
         mostLikelyCost: null,
         worstCaseCost: null,
+      driverGroup: "",
+        sensitivity: "medium",
       },
     ]);
 
@@ -536,11 +588,14 @@ function App() {
         percentiles: [0.05, 0.1, 0.5, 0.9],
       },
       confidenceTableVersion: "v1",
+      correlation_mode: correlationMode,
       cbsItems: cbsItems.map((x) => ({
         id: x.id,
         name: x.name,
         baseCost: Number(x.baseCost) || 0,
         confidenceFactor: x.confidenceFactor,
+        driver_group: correlationMode === "standard" ? (x.driverGroup || null) : null,
+        sensitivity: correlationMode === "standard" ? (x.sensitivity || "medium") : null,
         // backend uses these only when confidenceFactor == "User defined"
         bestCaseCost:
           x.bestCaseCost === null || x.bestCaseCost === undefined || x.bestCaseCost === ""
@@ -697,6 +752,8 @@ function App() {
         bestCaseCost: null,
         mostLikelyCost: null,
         worstCaseCost: null,
+      driverGroup: "",
+        sensitivity: "medium",
       }));
 
       setCbsItems(newItems);
@@ -818,7 +875,48 @@ function App() {
         <div style={{ marginTop: 10, marginBottom: 10 }} className="text-secondary">
           Base total: <strong className="text-primary">{money(totalBase)}</strong>
         </div>
+{/* Correlation modelling (None | Standard) */}
+<div style={{ marginTop: 10, marginBottom: 10, padding: 12, border: "1px solid #ddd", borderRadius: 8, background: "#fafafa" }}>
+  <div style={{ fontWeight: 800, marginBottom: 6, color: "#111" }}>Correlation modelling</div>
 
+  <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+    <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+      <input
+        type="radio"
+        name="correlationMode"
+        value="none"
+        checked={correlationMode === "none"}
+        onChange={() => {
+          setCorrelationMode("none");
+          resetResults();
+        }}
+      />
+      <span style={{ fontWeight: 700, color: "#111" }}>None</span>
+      <span className="text-muted" style={{ fontSize: 12 }}>(independent)</span>
+    </label>
+
+    <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+      <input
+        type="radio"
+        name="correlationMode"
+        value="standard"
+        checked={correlationMode === "standard"}
+        onChange={() => {
+          setCorrelationMode("standard");
+          resetResults();
+        }}
+      />
+      <span style={{ fontWeight: 700, color: "#111" }}>Standard</span>
+      <span className="text-muted" style={{ fontSize: 12 }}>(recommended)</span>
+    </label>
+  </div>
+
+  <div style={{ marginTop: 6, fontSize: 12, color: "#444" }}>
+    {correlationMode === "standard"
+      ? "Assign each CBS item to a primary driver and set sensitivity. This models common drivers that cause multiple cost items to move together."
+      : "CBS items are treated as independent (no correlation)."}
+  </div>
+</div>
         <div style={{ fontSize: 12, marginBottom: 10 }} className="text-muted">
           CBS CSV should contain <strong>names and optionally basecost</strong>. You can modify Base Cost and Confidence Factor here.
           If you pick <span className="pill">User defined</span>, you manually enter Best/Most likely/Worst.
@@ -835,6 +933,8 @@ function App() {
                 <th style={th}>Best case</th>
                 <th style={th}>Most likely</th>
                 <th style={th}>Worst case</th>
+                {correlationMode === "standard" && <th style={th}>Driver</th>}
+                {correlationMode === "standard" && <th style={th}>Sensitivity</th>}
                 <th style={th}>Delete</th>
               </tr>
             </thead>
@@ -1001,6 +1101,63 @@ function App() {
                       )}
                     </td>
 
+{correlationMode === "standard" && (
+  <td style={td}>
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <select
+        value={row.driverGroup || ""}
+        onChange={(e) => updateCbsRow(row.id, { driverGroup: e.target.value })}
+        style={input}
+        title={
+          row.driverGroup
+            ? (DRIVER_TOOLTIPS[row.driverGroup] || "")
+            : "Select the primary driver that influences this cost item."
+        }
+      >
+        <option value="">Select driver…</option>
+        {DRIVER_OPTIONS.map((d) => (
+          <option key={d} value={d}>{d}</option>
+        ))}
+      </select>
+      <span
+        title={
+          row.driverGroup
+            ? (DRIVER_TOOLTIPS[row.driverGroup] || "")
+            : "Select a driver to see help text."
+        }
+        style={{ cursor: "help", fontWeight: 900, color: "#555" }}
+        aria-label="Driver help"
+      >
+        ⓘ
+      </span>
+    </div>
+  </td>
+)}
+
+{correlationMode === "standard" && (
+  <td style={td}>
+    <div style={{ minWidth: 180 }}>
+      <input
+        type="range"
+        min="0"
+        max="3"
+        step="1"
+        value={sensitivityToIndex(row.sensitivity)}
+        onChange={(e) => updateCbsRow(row.id, { sensitivity: indexToSensitivity(e.target.value) })}
+        style={{ width: "100%" }}
+        title="Indicates how strongly this cost item responds to changes in the selected driver."
+      />
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#555", marginTop: 4 }}>
+        <span>None</span>
+        <span>Low</span>
+        <span>Med</span>
+        <span>High</span>
+      </div>
+    </div>
+  </td>
+)}
+
+
                     <td style={td}>
                       <button onClick={() => deleteCbsRow(row.id)} className="iconBtn dangerBtn" title="Delete CBS row" aria-label="Delete CBS row">×</button>
                     </td>
@@ -1009,7 +1166,7 @@ function App() {
               })}
 
               {cbsItems.length === 0 && (
-                <tr><td style={td} colSpan={8} className="text-secondary">No CBS rows. Import or Add.</td></tr>
+                <tr><td style={td} colSpan={correlationMode === "standard" ? 10 : 8} className="text-secondary">No CBS rows. Import or Add.</td></tr>
               )}
             </tbody>
           </table>
