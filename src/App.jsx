@@ -48,6 +48,36 @@ function indexToSensitivity(i) {
 
 const EXCLUDED_FACTORS = new Set(["% Allocation"]);
 
+// PM-friendly labels + tooltips for confidence factors (frontend-only; backend keys remain unchanged)
+const CONFIDENCE_LABELS = {
+  "Very Conservative": "No Upside Risk",
+  "Conservative": "Low Upside Risk",
+  "Realistic": "Balanced Cost Range",
+  "Target": "Target Cost with Upside Risk",
+  "Aggressive": "High Upside Risk",
+  "Very Aggressive": "Extreme Upside Risk",
+  "User defined": "User Defined"
+};
+
+const CONFIDENCE_TOOLTIPS = {
+  "Very Conservative": "Costs cannot exceed the base estimate.",
+  "Conservative": "Limited cost growth above the base estimate.",
+  "Realistic": "Typical cost variation around the base estimate.",
+  "Target": "Stretch target with potential cost growth.",
+  "Aggressive": "Significant exposure to cost growth.",
+  "Very Aggressive": "Very large potential cost overruns.",
+  "User defined": "Cost range entered directly by the user."
+};
+
+function confidenceLabel(k) {
+  return CONFIDENCE_LABELS[k] || k;
+}
+
+function confidenceTooltip(k) {
+  return CONFIDENCE_TOOLTIPS[k] || "";
+}
+
+
 function money(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "";
   return new Intl.NumberFormat("en-AU", {
@@ -131,11 +161,11 @@ function parseCbsCsv(csvText) {
   const lines = normaliseLines(csvText);
   if (lines.length === 0) return [];
 
-  const header = splitRow(lines[0]).map((h) => h.toLowerCase());
+  const header = splitRow(lines[0]).map((h) => String(h || "").toLowerCase());
 
   const findIdx = (aliases) => {
     for (const a of aliases) {
-      const i = header.indexOf(a.toLowerCase());
+      const i = header.indexOf(String(a).toLowerCase());
       if (i !== -1) return i;
     }
     return -1;
@@ -144,13 +174,22 @@ function parseCbsCsv(csvText) {
   const nameIdx = findIdx(["name", "cbs", "cbsname"]);
   const baseIdx = findIdx(["basecost", "base_cost", "cost", "base"]);
 
+  // 3-point (user defined) support
+  const lowIdx = findIdx(["low", "lowcost", "best", "bestcase", "min"]);
+  const mlIdx = findIdx(["mostlikely", "most_likely", "mostlikelycost", "mode", "ml"]);
+  const highIdx = findIdx(["high", "highcost", "worst", "worstcase", "max"]);
+
   const out = [];
   const seen = new Set();
 
   const toNumOrNull = (v) => {
-    const n = Number(String(v ?? "").trim());
+    const s = String(v ?? "").trim();
+    if (s === "") return null;
+    const n = Number(s);
     return Number.isFinite(n) ? n : null;
   };
+
+  const hasTrioCols = lowIdx !== -1 && mlIdx !== -1 && highIdx !== -1;
 
   // Case A: Has header row with a name column
   if (nameIdx !== -1) {
@@ -164,7 +203,15 @@ function parseCbsCsv(csvText) {
       seen.add(key);
 
       const baseCost = baseIdx !== -1 ? toNumOrNull(cells[baseIdx]) : null;
-      out.push({ name, baseCost });
+
+      let low = null, mostLikely = null, high = null;
+      if (hasTrioCols) {
+        low = toNumOrNull(cells[lowIdx]);
+        mostLikely = toNumOrNull(cells[mlIdx]);
+        high = toNumOrNull(cells[highIdx]);
+      }
+
+      out.push({ name, baseCost, low, mostLikely, high });
     }
     return out;
   }
@@ -179,11 +226,10 @@ function parseCbsCsv(csvText) {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    out.push({ name, baseCost: null });
+    out.push({ name, baseCost: null, low: null, mostLikely: null, high: null });
   }
 
   return out;
- 
 }
 
 /**
@@ -741,20 +787,30 @@ function App() {
       }
 
       const defaultFactor = confidenceFactors.includes("Realistic")
-        ? "Realistic"
-        : confidenceFactors[0] || "Realistic";
+        ? "Realistic" // UI label will show "Balanced Cost Range"
+        : (confidenceFactors[0] || "Realistic");
 
-      const newItems = rows.map((row, idx) => ({
-         id: makeSequentialId("cbs", idx + 1),
-        name: row.name,
-        baseCost: row.baseCost ?? 0,
-        confidenceFactor: defaultFactor, // default = Realistic (or first available)
-        bestCaseCost: null,
-        mostLikelyCost: null,
-        worstCaseCost: null,
-      driverGroup: "",
-        sensitivity: "medium",
-      }));
+      const newItems = rows.map((row, idx) => {
+        const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+        const hasUserDefined =
+          isNum(row.baseCost) &&
+          isNum(row.low) &&
+          isNum(row.mostLikely) &&
+          isNum(row.high);
+
+        return {
+          id: makeSequentialId("cbs", idx + 1),
+          name: row.name,
+          // keep baseCost if provided (even when user-defined trio is present)
+          baseCost: row.baseCost ?? 0,
+          confidenceFactor: hasUserDefined ? "User defined" : defaultFactor,
+          bestCaseCost: hasUserDefined ? Number(row.low) : null,
+          mostLikelyCost: hasUserDefined ? Number(row.mostLikely) : null,
+          worstCaseCost: hasUserDefined ? Number(row.high) : null,
+          driverGroup: "",
+          sensitivity: "medium",
+        };
+      });
 
       setCbsItems(newItems);
       cbsCounterRef.current = newItems.length;
@@ -828,7 +884,7 @@ function App() {
   }, [sensitivity]);
 
   return (
-    <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 1250, margin: "0 auto" }}>
+    <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 1650, margin: "0 auto" }}>
       <style>{`
         .btn { padding: 8px 12px; cursor: pointer; border-radius: 8px; border: 1px solid #999; background: #f7f7f7; color: #111; font-weight: 600; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -856,7 +912,7 @@ function App() {
           <h2 style={{ margin: 0 }} className="text-primary">Cost Breakdown Structure</h2>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={openCbsCsvPicker} className="btn" title="CSV: name only OR name + baseCost. Headers supported: name, baseCost"
+            <button onClick={openCbsCsvPicker} className="btn" title="CSV: name + (baseCost optional) + (low/mostLikely/high optional). If low/mostLikely/high are provided, the row becomes User defined."
 >
               Import CBS from file (CSV)
             </button>
@@ -918,23 +974,25 @@ function App() {
   </div>
 </div>
         <div style={{ fontSize: 12, marginBottom: 10 }} className="text-muted">
-          CBS CSV should contain <strong>names and optionally basecost</strong>. You can modify Base Cost and Confidence Factor here.
+          CBS CSV should contain <strong>name</strong> and optionally <strong>baseCost</strong>, and/or <strong>low / mostLikely / high</strong> (for User defined). You can modify Base Cost and Confidence Factor here.
           If you pick <span className="pill">User defined</span>, you manually enter Best/Most likely/Worst.
         </div>
 
         <div style={{ overflowX: "auto" }}>
-          <table style={table}>
+          <table style={{ ...table, minWidth: correlationMode === "standard" ? 1400 : 1200 }}>
             <thead>
               <tr>
                 <th style={th}>ID</th>
-                <th style={th}>Name</th>
-                <th style={th}>Base Cost (AUD)</th>
-                <th style={th}>Confidence Factor</th>
-                <th style={th}>Best case</th>
-                <th style={th}>Most likely</th>
-                <th style={th}>Worst case</th>
-                {correlationMode === "standard" && <th style={th}>Driver</th>}
-                {correlationMode === "standard" && <th style={th}>Sensitivity</th>}
+                <th style={{ ...th, minWidth: 260 }}>Name</th>
+                {/* Keep Base/Best/Most/Worst aligned widths for readability */}
+                <th style={{ ...th, minWidth: 120 }}>Base Cost (AUD)</th>
+                <th style={{ ...th, minWidth: 240 }}>Confidence Factor</th>
+                <th style={{ ...th, minWidth: 120 }}>Best case</th>
+                <th style={{ ...th, minWidth: 120 }}>Most likely</th>
+                <th style={{ ...th, minWidth: 120 }}>Worst case</th>
+                {correlationMode === "standard" && <th style={{ ...th, minWidth: 160, whiteSpace: "nowrap" }}>Driver</th>}
+                {/* Sensitivity column: deliberately narrower to avoid wasting space */}
+                {correlationMode === "standard" && <th style={{ ...th, minWidth: 160, whiteSpace: "nowrap" }}>Sensitivity</th>}
                 <th style={th}>Delete</th>
               </tr>
             </thead>
@@ -992,7 +1050,7 @@ function App() {
                         value={row.name}
                         onChange={(e) => updateCbsRow(row.id, { name: e.target.value })}
                         placeholder="e.g., CONSTRUCTION"
-                        style={input}
+                        style={{ ...input, minWidth: 260 }}
                       />
                     </td>
 
@@ -1012,19 +1070,32 @@ function App() {
                     </td>
 
                     <td style={td}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <select
                         value={row.confidenceFactor}
                         onChange={(e) => updateCbsRow(row.id, { confidenceFactor: e.target.value })}
-                        style={{ ...input, border: badFactor ? "2px solid #c00" : "1px solid #ccc" }}
+                        style={{ ...input, flex: "1 1 auto", minWidth: 220, border: badFactor ? "2px solid #c00" : "1px solid #ccc" }}
                       >
                         {confidenceFactors.length === 0 ? (
                           <option value="">Loading…</option>
                         ) : (
                           confidenceFactors.map((k) => (
-                            <option key={k} value={k}>{k}</option>
+                            <option key={k} value={k}>{confidenceLabel(k)}</option>
                           ))
                         )}
                       </select>
+                      <span
+                        title={
+                          row.confidenceFactor
+                            ? confidenceTooltip(row.confidenceFactor)
+                            : "Select a confidence factor to see help text."
+                        }
+                        style={{ cursor: "help", fontWeight: 900, color: "#555" }}
+                        aria-label="Confidence factor help"
+                      >
+                        ⓘ
+                      </span>
+                    </div>
                       {badFactor && (
                         <div style={{ fontSize: 12, marginTop: 4, color: "#ff6b6b" }}>
                           Choose a valid confidence factor.
@@ -1107,7 +1178,7 @@ function App() {
       <select
         value={row.driverGroup || ""}
         onChange={(e) => updateCbsRow(row.id, { driverGroup: e.target.value })}
-        style={input}
+        style={{ ...input, minWidth: 150 }}
         title={
           row.driverGroup
             ? (DRIVER_TOOLTIPS[row.driverGroup] || "")
@@ -1136,7 +1207,7 @@ function App() {
 
 {correlationMode === "standard" && (
   <td style={td}>
-    <div style={{ minWidth: 180 }}>
+    <div style={{ minWidth: 160, maxWidth: 176 }}>
       <input
         type="range"
         min="0"
