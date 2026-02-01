@@ -1,68 +1,84 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  /* Theme tokens */
+  --page-bg: #f3f4f6;
+  --card-bg: #ffffff;
+  --table-bg: #ffffff;
+  --table-head-bg: #f9fafb;
+  --input-bg: #ffffff;
+
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+
+  --border-input: #d1d5db;
+  --border-card: #e5e7eb;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+
+  --danger: #dc2626;
+
+  /* Button defaults used by App.jsx inline <style> */
+  --btn-primary-bg: var(--accent);
+  --btn-primary-hover: var(--accent-hover);
+  --btn-secondary-bg: #ffffff;
+  --btn-secondary-hover: #f9fafb;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  color-scheme: light;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+html, body {
+  height: 100%;
 }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
+  min-height: 100vh;
+  background: var(--page-bg);
+  color: var(--text-primary);
+}
+
+/* Prevent Vite template styles from centering the app */
+#root {
   min-height: 100vh;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
+/* Links */
+a {
   font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
+  color: var(--accent);
+  text-decoration: none;
 }
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+/* Form controls: enterprise-style focus */
+input, select, textarea {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--input-bg);
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: 3px solid rgba(37, 99, 235, 0.20);
+  border-color: var(--accent);
+}
+
+/* Remove browser button styling that can leak dark backgrounds */
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
 }
