@@ -35,6 +35,28 @@ const DRIVER_TOOLTIPS = {
 
 const SENSITIVITY_LEVELS = ["none", "low", "medium", "high"];
 
+
+function formatCbsIdDisplay(id) {
+  const raw = String(id || "");
+  const m = raw.match(/^([a-zA-Z]+)\s*0*(\d+)$/);
+  if (!m) return raw.toUpperCase();
+  const prefix = m[1].toUpperCase();
+  const num = String(parseInt(m[2], 10)).padStart(3, "0");
+  return `${prefix}${num}`;
+}
+
+
+function formatRiskIdDisplay(id) {
+  // Display-only formatting: e.g. r1 -> R001, R0003 -> R003
+  const raw = String(id || "");
+  const m = raw.match(/^([a-zA-Z]+)\s*0*(\d+)$/);
+  if (!m) return raw.toUpperCase();
+  const prefix = m[1].toUpperCase();
+  const num = String(parseInt(m[2], 10)).padStart(3, "0");
+  return `${prefix}${num}`;
+}
+
+
 function sensitivityToIndex(s) {
   const i = SENSITIVITY_LEVELS.indexOf(String(s || "").toLowerCase());
   return i === -1 ? 2 : i; // default = medium
@@ -358,6 +380,13 @@ function App() {
   const [confidenceFactorMap, setConfidenceFactorMap] = useState({});
   const [errors, setErrors] = useState([]);
 
+  // Project metadata (UI-only; used later for Excel export)
+  const [projectName, setProjectName] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [projectManager, setProjectManager] = useState("");
+  const [projectDate, setProjectDate] = useState("");
+  const [projectNotes, setProjectNotes] = useState("");
+
   // Counters so new rows get nice IDs
   const cbsCounterRef = useRef(4); // start with 4 CBS items
   const riskCounterRef = useRef(2); // start with 2 risks
@@ -440,6 +469,9 @@ function App() {
   // Correlation modelling (None | Standard)
   const [correlationMode, setCorrelationMode] = useState("none");
 
+  // UI tabs (PR2)
+  const [activeTab, setActiveTab] = useState("project");
+
   // Results
   const [results, setResults] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -504,6 +536,86 @@ function App() {
   const totalBase = useMemo(() => {
     return cbsItems.reduce((sum, r) => sum + (Number(r.baseCost) || 0), 0);
   }, [cbsItems]);
+
+  // Risk register total shown as sum of 'Most Likely ($)' for contingent risks.
+  const totalRiskMostLikely = useMemo(() => {
+    return risks.reduce((sum, r) => {
+      const isInherent = String(r.riskType || "contingent").toLowerCase() === "inherent";
+      if (isInherent) return sum;
+      return sum + (Number(r.mostLikelyCost) || 0);
+    }, 0);
+  }, [risks]);
+
+
+  // Input validation to control Run Simulation state (UI-only gate; backend still validates).
+  const validationIssues = useMemo(() => {
+    const issues = [];
+
+    const isNum = (v) => typeof v === "number" ? Number.isFinite(v) : (v !== null && v !== "" && Number.isFinite(Number(v)));
+
+    // Iterations sanity (kept lightweight)
+    const it = Number(iterations);
+    if (!Number.isFinite(it) || it <= 0) issues.push("Iterations must be a positive number.");
+    if (Number.isFinite(it) && it > 20000) issues.push("Iterations must be 20,000 or less.");
+
+    // CBS items
+    if (!Array.isArray(cbsItems) || cbsItems.length === 0) issues.push("At least one CBS cost item is required.");
+    (cbsItems || []).forEach((x, i) => {
+      const row = `CBS row ${i + 1}`;
+      if (!String(x.name || "").trim()) issues.push(`${row}: Name is required.`);
+      if (!isNum(x.baseCost) || Number(x.baseCost) < 0) issues.push(`${row}: Base Cost must be 0 or more.`);
+      if (!x.confidenceFactor) issues.push(`${row}: Confidence Factor is required.`);
+
+      // Standard correlation requires driver group assignment
+      if (String(correlationMode).toLowerCase() === "standard") {
+        if (!String(x.driverGroup || "").trim()) issues.push(`${row}: Driver group is required in Standard correlation mode.`);
+        const s = String(x.sensitivity || "medium").toLowerCase();
+        if (!["low", "medium", "high"].includes(s)) issues.push(`${row}: Sensitivity must be Low/Medium/High.`);
+      }
+
+      if (String(x.confidenceFactor).toLowerCase() === "user defined") {
+        if (!isNum(x.bestCaseCost) || Number(x.bestCaseCost) < 0) issues.push(`${row}: Best case is required (0 or more).`);
+        if (!isNum(x.mostLikelyCost) || Number(x.mostLikelyCost) < 0) issues.push(`${row}: Most likely is required (0 or more).`);
+        if (!isNum(x.worstCaseCost) || Number(x.worstCaseCost) < 0) issues.push(`${row}: Worst case is required (0 or more).`);
+
+        const b = Number(x.bestCaseCost);
+        const ml = Number(x.mostLikelyCost);
+        const w = Number(x.worstCaseCost);
+        if (Number.isFinite(b) && Number.isFinite(ml) && b > ml) issues.push(`${row}: Best case must be ≤ Most likely.`);
+        if (Number.isFinite(ml) && Number.isFinite(w) && ml > w) issues.push(`${row}: Most likely must be ≤ Worst case.`);
+      }
+    });
+
+    // Risks
+    (risks || []).forEach((r, i) => {
+      const row = `Risk row ${i + 1}`;
+      if (!String(r.name || "").trim()) issues.push(`${row}: Risk name is required.`);
+      const p = Number(r.probability);
+      if (!Number.isFinite(p) || p < 0 || p > 1) issues.push(`${row}: Probability must be between 0 and 1.`);
+      const lo = Number(r.lowCost);
+      const ml = Number(r.mostLikelyCost);
+      const hi = Number(r.highCost);
+      if (!Number.isFinite(lo) || lo < 0) issues.push(`${row}: Low cost must be 0 or more.`);
+      if (!Number.isFinite(ml) || ml < 0) issues.push(`${row}: Most likely cost must be 0 or more.`);
+      if (!Number.isFinite(hi) || hi < 0) issues.push(`${row}: High cost must be 0 or more.`);
+      if (Number.isFinite(lo) && Number.isFinite(ml) && lo > ml) issues.push(`${row}: Low must be ≤ Most likely.`);
+      if (Number.isFinite(ml) && Number.isFinite(hi) && ml > hi) issues.push(`${row}: Most likely must be ≤ High.`);
+    });
+
+    return issues;
+  }, [iterations, cbsItems, risks, correlationMode]);
+
+  const isInputsValid = validationIssues.length === 0;
+
+
+  // Cost model column widths (shrink when Standard correlation is selected to avoid horizontal scrolling)
+  const isStandardCorr = correlationMode === "standard";
+  const W_NAME = isStandardCorr ? 304 : 320;
+  const W_BASE = isStandardCorr ? 114 : 120; // -10%
+  const W_CONF = isStandardCorr ? 192 : 240; // -20%
+  const W_BEST = isStandardCorr ? 114 : 120; // -10%
+  const W_ML = isStandardCorr ? 114 : 120; // -10%
+  const W_WORST = isStandardCorr ? 114 : 120; // -10%
 
   function isUserDefinedFactor(cf) {
     return String(cf || "").trim().toLowerCase() === "user defined";
@@ -634,6 +746,14 @@ function App() {
         percentiles: [0.05, 0.1, 0.5, 0.9],
       },
       confidenceTableVersion: "v1",
+      // Project metadata (Excel export)
+      projectInfo: {
+        projectName,
+        projectId,
+        projectManager,
+        simulationDate: projectDate,
+        projectNotes,
+      },
       correlation_mode: correlationMode,
       cbsItems: cbsItems.map((x) => ({
         id: x.id,
@@ -884,39 +1004,238 @@ function App() {
   }, [sensitivity]);
 
   return (
-    <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 1650, margin: "0 auto" }}>
+    <div className="prs-app" style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 1650, margin: "0 auto" }}>
       <style>{`
-        .btn { padding: 8px 12px; cursor: pointer; border-radius: 8px; border: 1px solid #999; background: #f7f7f7; color: #111; font-weight: 600; }
-        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-        .btn:hover:not(:disabled) { background: #ededed; }
-        .iconBtn { padding: 6px 10px; cursor: pointer; border-radius: 8px; border: 1px solid #999; background: #f7f7f7; color: #111; font-weight: 800; line-height: 1; min-width: 40px; text-align: center; }
-        .iconBtn:hover { background: #ededed; }
-        .dangerBtn { border-color: #c33; background: #fff5f5; }
-        .dangerBtn:hover { background: #ffecec; }
-        .text-primary { color: #eaeaea; }
-        .text-secondary { color: #bdbdbd; }
-        .text-muted { color: #9aa0a6; }
-        code { background: rgba(0,0,0,0.08); padding: 2px 6px; border-radius: 6px; }
-        .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #999; background:#f3f3f3; }
-      `}</style>
+    .prs-app { color: var(--text-primary); }
+    .btn { padding: 8px 12px; cursor: pointer; border-radius: 8px; border: 1px solid var(--border-input); background: var(--btn-secondary-bg); color: var(--text-primary); font-weight: 600; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: var(--btn-secondary-hover); }
 
-      <h1 style={{ marginBottom: 6 }} className="text-primary">Risk Adjusted Project Cost Estimator MVP</h1>
+    .btnRunValid { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); color: #fff; }
+    .btnRunValid:hover:not(:disabled) { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
+    .btnRunInvalid { background: #e5e7eb; border-color: #d1d5db; color: #6b7280; }
 
-      <div style={{ marginBottom: 18 }} className="text-secondary">
-        Status: <strong className="text-primary">{status}</strong>
+    .iconBtn { padding: 6px 10px; cursor: pointer; border-radius: 8px; border: 1px solid var(--border-input); background: var(--btn-secondary-bg); color: var(--text-primary); font-weight: 800; line-height: 1; min-width: 40px; text-align: center; }
+    .iconBtn:hover { background: var(--btn-secondary-hover); }
+
+    .dangerBtn { border-color: var(--danger); background: #fff5f5; color: var(--danger); }
+    .dangerBtn:hover { background: #ffecec; }
+
+    .text-primary { color: var(--text-primary); }
+    .text-secondary { color: var(--text-secondary); }
+    .text-muted { color: var(--text-muted); }
+    .text-danger { color: var(--danger); }
+
+    code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 6px; }
+
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border-input); background: #f9fafb; color: var(--text-primary); }
+
+    html { scrollbar-gutter: stable; }
+    html, body { overflow-y: scroll; }
+
+    .tabBtnActive { background: var(--accent) !important; border-color: var(--accent) !important; color: #fff !important; }
+    .tabBtnActive:hover:not(:disabled) { background: var(--accent-hover) !important; border-color: var(--accent-hover) !important; }
+  `}</style>
+      <header style={{ position: "sticky", top: 0, zIndex: 20, background: "var(--card-bg)", borderBottom: "1px solid var(--border-card)", paddingTop: 10, paddingBottom: 12, boxShadow: "0 1px 2px rgba(0,0,0,0.06)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <img
+            src="/PRS-logo-noBG.png"
+            alt="Project Risk Solutions logo"
+            style={{ height: 44, width: "auto", display: "block" }}
+          />
+          <div>
+            <h1 style={{ margin: 0, lineHeight: 1.1 }} className="text-primary">Risk Adjusted Cost Modelling Tool</h1>
+            <div className="text-secondary" style={{ marginTop: 6 }}>
+              Status: <strong className="text-primary">{status}</strong>
+            </div>
+          </div>
+        </div>
+      </header>
+
+{/* Tabs bar: sticky so navigation remains visible while scrolling */}
+<div
+  style={{
+    position: "sticky",
+    // Header is also sticky (top:0). Keep tabs pinned just below it.
+    top: 78,
+    zIndex: 19,
+    background: "var(--page-bg)",
+    borderBottom: "1px solid var(--border-card)",
+    paddingTop: 10,
+    paddingBottom: 10,
+    marginBottom: 16,
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+  }}
+>
+  {[
+    ["project", "Project Settings"],
+    ["cost", "Cost model"],
+    ["risk", "Risk register"],
+    ["results", "Simulation & Results"],
+  ].map(([key, label]) => (
+    <button
+      key={key}
+      onClick={() => setActiveTab(key)}
+      className={`btn ${activeTab === key ? "tabBtnActive" : ""}`}
+    >
+      {label}
+    </button>
+  ))}
+</div>
+
+
+      {activeTab === "project" && (
+  <section style={card}>
+    <h2 style={{ marginTop: 0 }} className="text-primary">Project Settings</h2>
+
+    
+
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10, marginBottom: 14 }}>
+      <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+        <label style={label}>Project name</label>
+        <input
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          placeholder="e.g., Bridge Construction Project - Stage 1"
+          style={input}
+        />
       </div>
 
-      {/* CBS */}
+      <div style={{ minWidth: 220, flex: "0 0 220px" }}>
+        <label style={label}>Project ID</label>
+        <input
+          value={projectId}
+          onChange={(e) => setProjectId(e.target.value)}
+          placeholder="e.g., PRJ-001"
+          style={input}
+        />
+      </div>
+
+      <div style={{ minWidth: 260, flex: "1 1 260px" }}>
+        <label style={label}>Project manager</label>
+        <input
+          value={projectManager}
+          onChange={(e) => setProjectManager(e.target.value)}
+          placeholder="e.g., Sarah Smith"
+          style={input}
+        />
+      </div>
+
+      <div style={{ minWidth: 220, flex: "0 0 220px" }}>
+        <label style={label}>Simulation date</label>
+        <input
+          type="date"
+          value={projectDate}
+          onChange={(e) => setProjectDate(e.target.value)}
+          style={input}
+        />
+      </div>
+
+      <div style={{ minWidth: 540, flex: "1 1 540px" }}>
+        <label style={label}>Notes</label>
+        <textarea
+          value={projectNotes}
+          onChange={(e) => setProjectNotes(e.target.value)}
+          placeholder="Optional notes (e.g., scope boundaries, key assumptions, approvals) — exported later in Excel."
+          style={{ ...input, height: 70, resize: "vertical" }}
+        />
+      </div>
+    </div>
+<div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div style={{ minWidth: 220 }}>
+        <label style={label}>Iterations</label>
+        <input
+          type="number"
+          value={iterations}
+          onChange={(e) => setIterations(e.target.value)}
+          min="1"
+          step="1"
+          style={input}
+        />
+        <div style={{ fontSize: 12, marginTop: 4 }} className="text-muted">Tip: 5,000–10,000 is typical.</div>
+      </div>
+
+      <div style={{ minWidth: 220 }}>
+        <label style={label}>Random seed</label>
+        <input
+          type="number"
+          value={seed}
+          onChange={(e) => setSeed(e.target.value)}
+          step="1"
+          style={input}
+        />
+        <div style={{ fontSize: 12, marginTop: 4 }} className="text-muted">Same seed + same inputs = same results.</div>
+      </div>
+    </div>
+
+    <div style={{ marginTop: 14 }}>
+      <div style={{ border: "1px solid var(--border-card)", background: "var(--card-bg)", padding: 12, borderRadius: 10 }}>
+        <label style={{ ...label, marginBottom: 10 }}>Correlation modelling</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+
+        <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="correlationMode"
+            value="none"
+            checked={correlationMode === "none"}
+            onChange={() => {
+              setCorrelationMode("none");
+              resetResults();
+            }}
+          />
+          <span style={{ fontWeight: 700 }} className="text-primary">None</span>
+          <span className="text-muted" style={{ fontSize: 12 }}>(independent)</span>
+        </label>
+
+        <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+          <input
+            type="radio"
+            name="correlationMode"
+            value="standard"
+            checked={correlationMode === "standard"}
+            onChange={() => {
+              setCorrelationMode("standard");
+              resetResults();
+            }}
+          />
+          <span style={{ fontWeight: 700 }} className="text-primary">Standard</span>
+          <span className="text-muted" style={{ fontSize: 12 }}>(recommended)</span>
+        </label>
+      </div>
+
+      <div style={{ marginTop: 6, fontSize: 12 }} className="text-secondary">
+        {correlationMode === "standard"
+          ? "Assign each CBS item to a primary driver and set sensitivity. A shared driver shock is applied across CBS items."
+          : "CBS items are treated as independent (no correlation)."}
+              </div>
+      </div>
+    </div>
+  </section>
+)}
+
+{/* CBS */}
+      {activeTab === "cost" && (
       <section style={card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <h2 style={{ margin: 0 }} className="text-primary">Cost Breakdown Structure</h2>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={openCbsCsvPicker} className="btn" title="CSV: name + (baseCost optional) + (low/mostLikely/high optional). If low/mostLikely/high are provided, the row becomes User defined."
->
-              Import CBS from file (CSV)
-            </button>
-            <button onClick={addCbsRow} className="btn">+ Add CBS Row</button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button onClick={openCbsCsvPicker} className="btn" title="CSV: name + (baseCost optional) + (low/mostLikely/high optional). If low/mostLikely/high are provided, the row becomes User defined."
+  >
+                Import costs from CSV
+              </button>
+              <button onClick={addCbsRow} className="btn">+ Add Cost Row</button>
+            </div>
+
+            {!isInputsValid && (
+              <div style={{ fontSize: 12, color: "var(--danger)" }}>
+                Complete required Cost Model + Risk Register fields to enable Run Simulation.
+              </div>
+            )}
           </div>
 
           <input
@@ -932,68 +1251,28 @@ function App() {
           Base total: <strong className="text-primary">{money(totalBase)}</strong>
         </div>
 {/* Correlation modelling (None | Standard) */}
-<div style={{ marginTop: 10, marginBottom: 10, padding: 12, border: "1px solid #ddd", borderRadius: 8, background: "#fafafa" }}>
-  <div style={{ fontWeight: 800, marginBottom: 6, color: "#111" }}>Correlation modelling</div>
 
-  <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-    <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-      <input
-        type="radio"
-        name="correlationMode"
-        value="none"
-        checked={correlationMode === "none"}
-        onChange={() => {
-          setCorrelationMode("none");
-          resetResults();
-        }}
-      />
-      <span style={{ fontWeight: 700, color: "#111" }}>None</span>
-      <span className="text-muted" style={{ fontSize: 12 }}>(independent)</span>
-    </label>
-
-    <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-      <input
-        type="radio"
-        name="correlationMode"
-        value="standard"
-        checked={correlationMode === "standard"}
-        onChange={() => {
-          setCorrelationMode("standard");
-          resetResults();
-        }}
-      />
-      <span style={{ fontWeight: 700, color: "#111" }}>Standard</span>
-      <span className="text-muted" style={{ fontSize: 12 }}>(recommended)</span>
-    </label>
-  </div>
-
-  <div style={{ marginTop: 6, fontSize: 12, color: "#444" }}>
-    {correlationMode === "standard"
-      ? "Assign each CBS item to a primary driver and set sensitivity. This models common drivers that cause multiple cost items to move together."
-      : "CBS items are treated as independent (no correlation)."}
-  </div>
-</div>
         <div style={{ fontSize: 12, marginBottom: 10 }} className="text-muted">
           CBS CSV should contain <strong>name</strong> and optionally <strong>baseCost</strong>, and/or <strong>low / mostLikely / high</strong> (for User defined). You can modify Base Cost and Confidence Factor here.
           If you pick <span className="pill">User defined</span>, you manually enter Best/Most likely/Worst.
         </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ ...table, minWidth: correlationMode === "standard" ? 1400 : 1200 }}>
+        <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "60vh" }}>
+          <table style={{ ...table, minWidth: correlationMode === "standard" ? 1320 : 1200 }}>
             <thead>
               <tr>
-                <th style={th}>ID</th>
-                <th style={{ ...th, minWidth: 260 }}>Name</th>
+                <th style={stickyTh}>ID</th>
+                <th style={{ ...stickyTh, minWidth: W_NAME, width: W_NAME }}>Name</th>
                 {/* Keep Base/Best/Most/Worst aligned widths for readability */}
-                <th style={{ ...th, minWidth: 120 }}>Base Cost (AUD)</th>
-                <th style={{ ...th, minWidth: 240 }}>Confidence Factor</th>
-                <th style={{ ...th, minWidth: 120 }}>Best case</th>
-                <th style={{ ...th, minWidth: 120 }}>Most likely</th>
-                <th style={{ ...th, minWidth: 120 }}>Worst case</th>
-                {correlationMode === "standard" && <th style={{ ...th, minWidth: 160, whiteSpace: "nowrap" }}>Driver</th>}
+                <th style={{ ...stickyTh, minWidth: W_BASE }}>Base Cost ($)</th>
+                <th style={{ ...stickyTh, minWidth: W_CONF }}>Confidence Factor</th>
+                <th style={{ ...stickyTh, minWidth: W_BEST }}>Best case</th>
+                <th style={{ ...stickyTh, minWidth: W_ML }}>Most likely</th>
+                <th style={{ ...stickyTh, minWidth: W_WORST }}>Worst case</th>
+                {correlationMode === "standard" && <th style={{ ...stickyTh, minWidth: 160, whiteSpace: "nowrap" }}>Driver</th>}
                 {/* Sensitivity column: deliberately narrower to avoid wasting space */}
-                {correlationMode === "standard" && <th style={{ ...th, minWidth: 160, whiteSpace: "nowrap" }}>Sensitivity</th>}
-                <th style={th}>Delete</th>
+                {correlationMode === "standard" && <th style={{ ...stickyTh, minWidth: 160, whiteSpace: "nowrap" }}>Sensitivity</th>}
+                <th style={stickyTh}>Delete</th>
               </tr>
             </thead>
             <tbody>
@@ -1024,44 +1303,44 @@ function App() {
 
                 const derivedCellStyle = {
                   ...input,
-                background: "#f3f3f3",
-                color: "#111111",
-                WebkitTextFillColor: "#111111",
-                opacity: 1,
+                  background: "#f3f3f3",
+                  color: "#111111",
+                  WebkitTextFillColor: "#111111",
+                  opacity: 1,
                 };
 
-
+                // For User defined, keep the same light input style as derived fields for legibility.
                 const udCellStyle = {
-                ...input,
-                border: badUD ? "2px solid #c00" : "1px solid #ccc",
-                background: "#ffffff",
-                color: "#111111",
-                WebkitTextFillColor: "#111111",
-                opacity: 1,
+                  ...input,
+                  border: badUD ? "2px solid var(--danger)" : "1px solid #ccc",
+                  background: "#f3f3f3",
+                  color: "#111111",
+                  WebkitTextFillColor: "#111111",
+                  opacity: 1,
                 };
 
 
                 return (
-                  <tr key={row.id}>
-                    <td style={td} className="text-secondary" title={row.id}>{row.id}</td>
+                  <tr key={formatCbsIdDisplay(row.id)}>
+                    <td style={td} className="text-secondary" title={formatCbsIdDisplay(row.id)}>{formatCbsIdDisplay(row.id)}</td>
 
                     <td style={td}>
                       <input
                         value={row.name}
                         onChange={(e) => updateCbsRow(row.id, { name: e.target.value })}
                         placeholder="e.g., CONSTRUCTION"
-                        style={{ ...input, minWidth: 260 }}
+                        style={{ ...input, minWidth: 320, width: 320 }}
                       />
                     </td>
 
-                    <td style={td}>
+                    <td style={{ ...td, minWidth: W_BASE }}>
                       <input
                         type="number"
                         value={row.baseCost}
                         onChange={(e) => updateCbsRow(row.id, { baseCost: e.target.value })}
                         min="0"
                         step="1"
-                        style={{ ...input, border: badBaseCost ? "2px solid #c00" : "1px solid #ccc" }}
+                        style={{ ...input, border: badBaseCost ? "2px solid var(--danger)" : "1px solid #ccc" }}
                         disabled={false}
                       />
                       <div style={{ fontSize: 12, marginTop: 4 }} className="text-muted">
@@ -1074,7 +1353,7 @@ function App() {
                       <select
                         value={row.confidenceFactor}
                         onChange={(e) => updateCbsRow(row.id, { confidenceFactor: e.target.value })}
-                        style={{ ...input, flex: "1 1 auto", minWidth: 220, border: badFactor ? "2px solid #c00" : "1px solid #ccc" }}
+                        style={{ ...input, flex: "1 1 auto", minWidth: 220, border: badFactor ? "2px solid var(--danger)" : "1px solid #ccc" }}
                       >
                         {confidenceFactors.length === 0 ? (
                           <option value="">Loading…</option>
@@ -1090,19 +1369,19 @@ function App() {
                             ? confidenceTooltip(row.confidenceFactor)
                             : "Select a confidence factor to see help text."
                         }
-                        style={{ cursor: "help", fontWeight: 900, color: "#555" }}
+                        style={{ cursor: "help", fontWeight: 900, color: "var(--text-muted)" }}
                         aria-label="Confidence factor help"
                       >
                         ⓘ
                       </span>
                     </div>
                       {badFactor && (
-                        <div style={{ fontSize: 12, marginTop: 4, color: "#ff6b6b" }}>
+                        <div style={{ fontSize: 12, marginTop: 4, color: "var(--danger)" }}>
                           Choose a valid confidence factor.
                         </div>
                       )}
                       {ud && badUD && (
-                        <div style={{ fontSize: 12, marginTop: 4, color: "#ff6b6b" }}>
+                        <div style={{ fontSize: 12, marginTop: 4, color: "var(--danger)" }}>
                           For User defined: ensure Best ≤ Most likely ≤ Worst and all are provided.
                         </div>
                       )}
@@ -1196,7 +1475,7 @@ function App() {
             ? (DRIVER_TOOLTIPS[row.driverGroup] || "")
             : "Select a driver to see help text."
         }
-        style={{ cursor: "help", fontWeight: 900, color: "#555" }}
+        style={{ cursor: "help", fontWeight: 900, color: "var(--text-muted)" }}
         aria-label="Driver help"
       >
         ⓘ
@@ -1218,7 +1497,7 @@ function App() {
         style={{ width: "100%" }}
         title="Indicates how strongly this cost item responds to changes in the selected driver."
       />
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#555", marginTop: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
         <span>None</span>
         <span>Low</span>
         <span>Med</span>
@@ -1240,20 +1519,39 @@ function App() {
                 <tr><td style={td} colSpan={correlationMode === "standard" ? 10 : 8} className="text-secondary">No CBS rows. Import or Add.</td></tr>
               )}
             </tbody>
+<tfoot>
+              <tr>
+                <td style={{ ...td, fontWeight: 800 }} colSpan={2}>Total</td>
+                <td style={{ ...td, fontWeight: 800 }}>{money(totalBase)}</td>
+                <td style={td} colSpan={correlationMode === "standard" ? 7 : 5}></td>
+              </tr>
+            </tfoot>
+
           </table>
         </div>
       </section>
+      )}
+
 
       {/* Risk Register */}
+      {activeTab === "risk" && (
       <section style={card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <h2 style={{ margin: 0 }} className="text-primary">Risk register</h2>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={openRisksCsvPicker} className="btn" title="CSV headers: name,riskType(optional),probability,lowCost,mostLikelyCost,highCost">
-              Import Risks from file (CSV)
-            </button>
-            <button onClick={addRiskRow} className="btn">+ Add Risk</button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button onClick={openRisksCsvPicker} className="btn" title="CSV headers: name,riskType(optional),probability,lowCost,mostLikelyCost,highCost">
+                Import risks from CSV
+              </button>
+              <button onClick={addRiskRow} className="btn">+ Add Risk</button>
+            </div>
+
+            {!isInputsValid && (
+              <div style={{ fontSize: 12, color: "var(--danger)" }}>
+                Complete required Cost Model + Risk Register fields to enable Run Simulation.
+              </div>
+            )}
           </div>
 
           <input
@@ -1266,21 +1564,21 @@ function App() {
         </div>
 
         <div style={{ fontSize: 12, marginTop: 10 }} className="text-muted">
-          Optional CSV header <code>riskType</code> can be <code>inherent</code> or <code>contingent</code>. If inherent, costs are ignored.
+          Only Event Driven (Contingent) risk costs are considered. If inherent, costs are ignored here.Adjust Base Cost variability to reflect Inherent risk impacts
         </div>
 
         <div style={{ overflowX: "auto", marginTop: 10 }}>
-          <table style={table}>
+          <table style={{ ...table, minWidth: 1200 }}>
             <thead>
               <tr>
-                <th style={th}>ID</th>
-                <th style={th}>Risk</th>
-                <th style={th}>Risk Type</th>
-                <th style={th}>Probability (0–1)</th>
-                <th style={th}>Low ($)</th>
-                <th style={th}>Most Likely ($)</th>
-                <th style={th}>High ($)</th>
-                <th style={th}>Delete</th>
+                <th style={stickyTh}>ID</th>
+                <th style={{ ...stickyTh, minWidth: 360 }}>Risk</th>
+                <th style={stickyTh}>Risk Type</th>
+                <th style={{ ...stickyTh, fontSize: "13.5px", whiteSpace: "nowrap" }}>Probability (0–1)</th>
+                <th style={stickyTh}>Low ($)</th>
+                <th style={stickyTh}>Most Likely ($)</th>
+                <th style={stickyTh}>High ($)</th>
+                <th style={stickyTh}>Delete</th>
               </tr>
             </thead>
             <tbody>
@@ -1292,9 +1590,9 @@ function App() {
 
                 return (
                   <tr key={r.id}>
-                    <td style={td} className="text-secondary" title={r.id}>{r.id}</td>
+                    <td style={td} className="text-secondary" title={r.id}>{formatRiskIdDisplay(r.id)}</td>
 
-                    <td style={td}>
+                    <td style={{ ...td, minWidth: 360 }}>
                       <input
                         value={r.name}
                         onChange={(e) => updateRiskRow(r.id, { name: e.target.value })}
@@ -1322,7 +1620,7 @@ function App() {
                         min="0"
                         max="1"
                         step="0.01"
-                        style={{ ...input, border: badP ? "2px solid #c00" : "1px solid #ccc" }}
+                        style={{ ...input, border: badP ? "2px solid var(--danger)" : "1px solid #ccc" }}
                       />
                     </td>
 
@@ -1373,50 +1671,46 @@ function App() {
                 <tr><td style={td} colSpan={8} className="text-secondary">No risks. Import or Add.</td></tr>
               )}
             </tbody>
+<tfoot>
+              <tr>
+                <td style={{ ...td, fontWeight: 800 }} colSpan={5}>Total (Most likely)</td>
+                <td style={{ ...td, fontWeight: 800 }}>{money(totalRiskMostLikely)}</td>
+                <td style={td} colSpan={2}></td>
+              </tr>
+            </tfoot>
+
           </table>
         </div>
       </section>
+      )}
+
 
       {/* Simulation */}
+      {activeTab === "results" && (
       <section style={card}>
         <h2 style={{ marginTop: 0 }} className="text-primary">Simulation</h2>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-          <div style={{ minWidth: 220 }}>
-            <label style={label}>Iterations</label>
-            <input
-              type="number"
-              value={iterations}
-              onChange={(e) => setIterations(e.target.value)}
-              min="1"
-              step="1"
-              style={input}
-            />
-            <div style={{ fontSize: 12, marginTop: 4 }} className="text-muted">Tip: 5,000–10,000 is typical.</div>
-          </div>
-
-          <div style={{ minWidth: 220 }}>
-            <label style={label}>Random seed</label>
-            <input
-              type="number"
-              value={seed}
-              onChange={(e) => setSeed(e.target.value)}
-              step="1"
-              style={input}
-            />
-            <div style={{ fontSize: 12, marginTop: 4 }} className="text-muted">Same seed + same inputs = same results.</div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 10 }}>
-            <button onClick={runSimulation} className="btn" style={{ minWidth: 160 }} disabled={isRunning || isExporting}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
+            <button
+              onClick={runSimulation}
+              className={`btn ${isInputsValid ? "btnRunValid" : "btnRunInvalid"}`}
+              style={{ minWidth: 192, padding: "12px 20px", fontSize: 18 }}
+              disabled={isRunning || isExporting || !isInputsValid}
+            >
               {isRunning ? "Running…" : "Run Simulation"}
             </button>
+            {!isInputsValid && (
+              <div style={{ fontSize: 12, color: "var(--danger)" }}>
+                Complete required Cost Model + Risk Register fields to enable Run Simulation.
+              </div>
+            )}
           </div>
         </div>
 
         {errors.length > 0 && (
           <div style={{ background: "#fff3f3", border: "1px solid #f3b5b5", padding: 12, borderRadius: 8 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6, color: "#a10000" }}>Validation / API errors / import warnings</div>
+            <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--danger)" }}>Validation / API errors / import warnings</div>
             <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(errors, null, 2)}</pre>
           </div>
         )}
@@ -1425,8 +1719,8 @@ function App() {
   <div
     style={{
       marginTop: 12,
-      background: "#f7fbff",
-      border: "1px solid #cfe4ff",
+      background: "var(--card-bg)",
+      border: "1px solid var(--border-card)",
       padding: 12,
       borderRadius: 8,
     }}
@@ -1439,7 +1733,7 @@ function App() {
         gap: 12,
       }}
     >
-      <div style={{ fontWeight: 700, color: "#111" }}>Results (AUD)</div>
+      <div style={{ fontWeight: 700 }} className="text-primary">Results ($)</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <button className="btn" onClick={downloadJson} disabled={!canExport}>
           {isExporting ? "Exporting…" : "Download JSON"}
@@ -1463,12 +1757,12 @@ function App() {
 
     {/* --- Sensitivity (Grouped, short) --- */}
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontWeight: 800, color: "#111", marginBottom: 8 }}>
+      <div style={{ fontWeight: 800, marginBottom: 8 }} className="text-primary">
         Sensitivity (Top drivers)
       </div>
 
       {(!sensitivity || sensitivity.length === 0) ? (
-        <div style={{ fontSize: 12, color: "#444" }}>
+        <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
           No sensitivity data returned. (Make sure your backend /simulate is returning <code>sensitivity</code>.)
         </div>
       ) : (
@@ -1497,27 +1791,26 @@ const renderTable = (title, rows) => (
               {/* Ensure legible text on light Results panel */}
               {/* Table defaults to dark-theme text in some browsers; force dark text here */}
 
-              <div style={{ fontWeight: 700, color: "#111", marginBottom: 6 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }} className="text-primary">
                 {title}{" "}
-                <span style={{ fontWeight: 600, color: "#555", fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: "var(--text-muted)", fontSize: 12 }}>
                   ({rows.length})
                 </span>
               </div>
 
               {rows.length === 0 ? (
-                <div style={{ fontSize: 12, color: "#444" }}>None</div>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>None</div>
               ) : (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", color: "#111" }}>
+                <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "60vh" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
-                        <th style={th}>Rank</th>
-                        <th style={th}>Driver</th>
-                        <th style={th}>Category</th>
-                        <th style={th}>Direction</th>
-                        <th style={th}>|ρ|</th>
-                        <th style={th}>ρ</th>
-                      </tr>
+                        <th style={stickyTh}>Rank</th>
+                        <th style={stickyTh}>Driver</th>
+                        <th style={stickyTh}>Category</th>
+                        <th style={stickyTh}>Direction</th>
+                        <th style={stickyTh}>|ρ|</th>
+</tr>
                     </thead>
                     <tbody>
                       {rows.map((r, i) => {
@@ -1526,27 +1819,28 @@ const renderTable = (title, rows) => (
                         const sign = rho >= 0 ? "+" : "-";
                         return (
                           <tr key={`${title}-${r.name}-${i}`}>
-                            <td style={{ ...td, color: "#111" }}>{i + 1}</td>
+                            <td style={td}>{i + 1}</td>
                             <td style={td}>
-                              <div style={{ fontWeight: 800, color: "#111" }}>
+                              <div style={{ fontWeight: 800, color: "var(--text-primary)" }}>
                                 {resolveDisplayName(r)}
                               </div>
-                              <div style={{ fontSize: 12, color: "#555" }}>
-                                {r.name}
+                              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                                {r.category === "RISK" ? formatRiskIdDisplay(r.name) : r.category === "CBS" ? formatCbsIdDisplay(r.name) : String(r.name || "").toUpperCase()}
                               </div>
                             </td>
-                            <td style={{ ...td, color: "#111" }}>{r.category}</td>
-                            <td style={{ ...td, color: "#111" }}>
-                              <span style={{ fontWeight: 800, color: "#111" }}>
+                            <td style={td}>{r.category}</td>
+                            <td style={td}>
+                              <span style={{ fontWeight: 800 }} className="text-primary">
                                 {sign}
                               </span>
                             </td>
-                            <td style={{ ...td, color: "#111" }}>{abs.toFixed(3)}</td>
-                            <td style={{ ...td, color: "#111" }}>{rho.toFixed(3)}</td>
-                          </tr>
+                            <td style={td}>{abs.toFixed(3)}</td>
+                            </tr>
                         );
                       })}
                     </tbody>
+
+
                   </table>
                 </div>
               )}
@@ -1555,7 +1849,7 @@ const renderTable = (title, rows) => (
 
           return (
             <div>
-              <div style={{ fontSize: 12, color: "#444" }}>
+              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                 Grouping rules: <strong>Dominant</strong> (|ρ| ≥ 0.30),{" "}
                 <strong>Moderate</strong> (0.15 ≤ |ρ| &lt; 0.30). (Spearman rank correlation.)
               </div>
@@ -1568,27 +1862,27 @@ const renderTable = (title, rows) => (
       )}
     </div>
 
-    <div style={{ marginTop: 10, fontSize: 12, color: "#444" }}>
+    <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-secondary)" }}>
           {/* --- Commentary (AI) --- */}
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontWeight: 800, color: "#111", marginBottom: 8 }}>
+      <div style={{ fontWeight: 800, marginBottom: 8 }} className="text-primary">
         Commentary {commentaryMode ? <span className="pill">{commentaryMode}</span> : null}
       </div>
 
       {isCommentaryRunning ? (
-        <div style={{ fontSize: 12, color: "#444" }}>Generating commentary…</div>
+        <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Generating commentary…</div>
       ) : commentary ? (
-        <pre style={{ margin: 0, whiteSpace: "pre-wrap", color: "#111", lineHeight: 1.35 }}>
+        <pre style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.35 }} className="text-primary">
           {commentary}
         </pre>
       ) : (
-        <div style={{ fontSize: 12, color: "#444" }}>
+        <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
           Commentary will appear here after you run a simulation.
         </div>
       )}
 
       {commentaryError ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: "#a10000" }}>
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>
           Commentary error: {commentaryError}
         </div>
       ) : null}
@@ -1603,6 +1897,8 @@ const renderTable = (title, rows) => (
 )}
 
       </section>
+      )}
+
     </div>
   );
 }
@@ -1610,44 +1906,67 @@ const renderTable = (title, rows) => (
 function ResultBox({ label, value }) {
   return (
     <div
-      style={{
-        border: "1px solid #d7e7ff",
-        borderRadius: 10,
-        padding: 12,
-        minWidth: 180,
-        background: "#ffffff",
-        color: "#111111",
-      }}
+      style={{ border: "1px solid var(--border-card)", borderRadius: 10, padding: 12, minWidth: 180, background: "var(--card-bg)" }}
     >
-      <div style={{ fontSize: 12, color: "#333" }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 800, marginTop: 6, color: "#111" }}>
+      <div style={{ fontSize: 12 }} className="text-secondary">{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800, marginTop: 6 }} className="text-primary">
         {value}
       </div>
     </div>
   );
 }
 
-const card = { border: "1px solid #ddd", borderRadius: 8, padding: 16, marginBottom: 18 };
-const table = { width: "100%", borderCollapse: "collapse" };
+// Keep panel geometry consistent across tabs to avoid perceived layout "jump".
+// Cost model is naturally taller; this minHeight gives the other tabs a similar canvas.
+const card = {
+  background: "var(--card-bg)",
+  border: "1px solid var(--border-card)",
+  boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
+  borderRadius: 10,
+  padding: 16,
+  marginBottom: 18,
+  width: "100%",
+  boxSizing: "border-box",
+  minHeight: 640,
+  minWidth: 1200,
+};
+
+const table = { width: "100%", borderCollapse: "collapse", background: "var(--table-bg)" };
+
 const th = {
   textAlign: "left",
-  borderBottom: "1px solid #444",
-  padding: "10px 8px",
-  background: "#2f2f2f",
-  color: "#ffffff",
+  borderBottom: "1px solid var(--border-card)",
+  padding: "12px 10px",
+  background: "var(--table-head-bg)",
+  color: "var(--text-primary)",
   fontWeight: 700,
   fontSize: 13,
 };
-const td = { borderBottom: "1px solid #eee", padding: "10px 8px", verticalAlign: "top" };
+
+const stickyTh = {
+  ...th,
+  position: "sticky",
+  top: 0,
+  zIndex: 3,
+};
+
+const td = {
+  borderBottom: "1px solid var(--border-card)",
+  padding: "12px 10px",
+  verticalAlign: "top",
+  color: "var(--text-primary)",
+};
+
 const input = {
   width: "100%",
   padding: 8,
-  border: "1px solid #ccc",
-  borderRadius: 6,
+  border: "1px solid var(--border-input)",
+  borderRadius: 8,
   boxSizing: "border-box",
-  background: "#ffffff",
-  color: "#111111",
+  background: "var(--input-bg)",
+  color: "var(--text-primary)",
 };
-const label = { display: "block", fontSize: 12, color: "#bdbdbd", marginBottom: 6 };
+
+const label = { display: "block", fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 };
 
 export default App;
